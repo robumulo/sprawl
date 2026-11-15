@@ -43,6 +43,11 @@ type WeaveRuntimeHandle struct {
 	sprawlRoot    string
 	name          string
 
+	// ctxMu guards stopContext, which is attached after construction by
+	// Real.RegisterRootRuntime (attachContextWatch).
+	ctxMu       sync.Mutex
+	stopContext func()
+
 	ring *agentloop.ActivityRing
 
 	// drainMu serialises drainPendingToStdin. Pokes arrive on independent MCP
@@ -245,6 +250,20 @@ func NewWeaveRuntimeHandle(rt *runtimepkg.UnifiedRuntime, session backendpkg.Ses
 	return h, nil
 }
 
+// attachContextWatch starts the context-guard subscriber on weave's bus. A
+// second call replaces (and stops) the first, so re-registration cannot leak
+// a subscriber.
+func (h *WeaveRuntimeHandle) attachContextWatch(name string, observe contextTurnObserver) {
+	stop := runContextWatchSubscriber(h.rt.EventBus(), name, observe, "weave-context-guard")
+	h.ctxMu.Lock()
+	prev := h.stopContext
+	h.stopContext = stop
+	h.ctxMu.Unlock()
+	if prev != nil {
+		prev()
+	}
+}
+
 // Interrupt delegates to UnifiedRuntime.Interrupt.
 func (h *WeaveRuntimeHandle) Interrupt(ctx context.Context) error {
 	return h.rt.Interrupt(ctx)
@@ -334,6 +353,15 @@ func (h *WeaveRuntimeHandle) stopOnceWith(ctx context.Context, stopRuntime func(
 		if h.stopUsage != nil {
 			joinWithTimeout(h.stopUsage, stopActivityTimeout,
 				"stopUsage abandoned — likely wedged usage subscriber goroutine (QUM-368)",
+				"handle", "WeaveRuntimeHandle", "agent", h.name)
+		}
+		h.ctxMu.Lock()
+		stopContext := h.stopContext
+		h.stopContext = nil
+		h.ctxMu.Unlock()
+		if stopContext != nil {
+			joinWithTimeout(stopContext, stopActivityTimeout,
+				"stopContext abandoned — likely wedged context-guard subscriber goroutine",
 				"handle", "WeaveRuntimeHandle", "agent", h.name)
 		}
 		// QUM-545: shared Close → Kill teardown helper. waitTimeout=0 means

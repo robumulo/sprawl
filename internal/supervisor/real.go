@@ -216,6 +216,10 @@ type Real struct {
 	// phase-B abandon site logs with the gate already held.
 	reclaimMu    sync.Mutex
 	reclaimGates map[string]*reclaimEntry
+
+	// ctxGuard is the context guard (context_guard.go): threshold and
+	// per-agent state. Constructed by NewReal, stopped by Shutdown.
+	ctxGuard *contextGuard
 }
 
 // realGitRevParseHEAD shells out to `git -C <dir> rev-parse HEAD`. stdio is
@@ -406,6 +410,7 @@ func NewReal(cfg Config) (*Real, error) {
 	}
 	starter := newInProcessUnifiedStarter(cfg.ChildInitSpec, cfg.ChildAllowedTools)
 	starter.faultEmitter = r.dispatchFault
+	starter.contextObserver = r.onContextTurn
 	r.runtimeStarter = starter
 
 	// QUM-899: blurb generator seams. NewCLIInvoker constructs lazily (no
@@ -423,6 +428,24 @@ func NewReal(cfg Config) (*Real, error) {
 		RefreshBlurb: r.maybeRefreshBlurb,
 	})
 	r.blurbTicker.Start()
+
+	// The context guard. Read once, like the idle reaper's knobs: an
+	// unparseable value keeps the default (and WARNs) rather than switching
+	// the guard off.
+	ctxTokens := config.DefaultContextGuardTokens
+	if c, err := config.Load(cfg.SprawlRoot); err == nil {
+		n, tErr := c.ContextGuardThreshold()
+		if tErr != nil {
+			slog.Default().Warn("context guard: using the default threshold", slog.Any("err", tErr))
+		}
+		ctxTokens = n
+	}
+	r.ctxGuard = newContextGuard(ctxTokens)
+	if ctxTokens > 0 {
+		slog.Default().Info("context guard: ENABLED", slog.Int("context_guard.tokens", ctxTokens))
+	} else {
+		slog.Default().Info("context guard: DISABLED (context_guard.tokens = 0)")
+	}
 
 	// QUM-1186 lane 3: the idle reaper. Config is read ONCE here — an
 	// unparseable value falls back to the built-in default and WARNs rather
@@ -516,6 +539,12 @@ func (r *Real) RegisterRootRuntime(name string, handle RuntimeHandle, agentState
 		Agent:      agentState,
 	})
 	rt.AttachHandle(handle)
+	// weave is not launched through the child starter, so its context watch
+	// is attached here. The handle owns the subscriber and stops it with
+	// itself.
+	if wh, ok := handle.(*WeaveRuntimeHandle); ok {
+		wh.attachContextWatch(name, r.onContextTurn)
+	}
 	return rt, nil
 }
 
@@ -547,6 +576,7 @@ func (r *Real) SetChildMCPConfig(initSpec backendpkg.InitSpec, allowedTools []st
 	}
 	starter := newInProcessUnifiedStarter(initSpec, allowedTools)
 	starter.faultEmitter = r.dispatchFault
+	starter.contextObserver = r.onContextTurn
 	r.runtimeStarter = starter
 }
 
@@ -1529,6 +1559,11 @@ func (r *Real) Shutdown(ctx context.Context) error {
 	// handle.
 	if r.idleReaper != nil {
 		r.idleReaper.Stop()
+	}
+	// Same reason as the reaper: a context-guard restart racing the teardown
+	// below would have two callers stopping the same handle.
+	if r.ctxGuard != nil {
+		r.ctxGuard.stop()
 	}
 	// QUM-1071: stop the blurb ticker first — don't refresh a blurb for a
 	// runtime that's about to be torn down.

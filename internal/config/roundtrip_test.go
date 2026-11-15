@@ -75,6 +75,7 @@ worktree.teardown: echo teardown
 idle_reclaim.after: 20m
 idle_reclaim.sweep: 45s
 goal_stall.after: 12m
+context_guard.tokens: 90000
 event_log.enabled: "true"
 `
 

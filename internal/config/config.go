@@ -95,6 +95,13 @@ type Config struct {
 	// and returns the default rather than honouring it.
 	GoalStallAfter string `yaml:"goal_stall.after,omitempty" sprawl:"default=30m,purpose=How long a goal owner must be quiet before the stall sweeper pokes it, as a Go duration. Must be positive; 0 is refused rather than read as 'poke immediately'. Lowering this below the length of a real turn pokes working agents"`
 
+	// ContextGuardTokens is the context-size threshold, in tokens, past which an
+	// agent is restarted into a fresh session (children) or asked to hand off
+	// (weave). A STRING on the idle_reclaim.* precedent: Load never prefills, so
+	// an int key would make "absent" and "0" the same value, and here absent
+	// must mean the default while "0" means off.
+	ContextGuardTokens string `yaml:"context_guard.tokens,omitempty" sprawl:"default=120000,purpose=Context size in tokens (input + cache read + cache creation of the last assistant frame) past which a child agent writes a handoff note and is restarted in a fresh session and weave is asked to call handoff. 0 disables the guard"`
+
 	// EventLog is the QUM-1249 event-log feature flag ("true" enables it).
 	//
 	// A STRING and not a bool because registry() panics on any field kind but
@@ -225,6 +232,30 @@ func (c *Config) EventLogEnabled() bool {
 	default:
 		return false
 	}
+}
+
+// DefaultContextGuardTokens is the context size at which the context guard
+// fires when context_guard.tokens is unset.
+const DefaultContextGuardTokens = 120000
+
+// ContextGuardThreshold returns the context guard threshold in tokens. Unset
+// returns DefaultContextGuardTokens; an explicit "0" returns 0, which disables
+// the guard. An unparseable or negative value returns the default alongside a
+// non-nil error, so a typo is reportable rather than silently switching the
+// guard off.
+func (c *Config) ContextGuardThreshold() (int, error) {
+	v := strings.TrimSpace(c.ContextGuardTokens)
+	if v == "" {
+		return DefaultContextGuardTokens, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return DefaultContextGuardTokens, fmt.Errorf("config: context_guard.tokens = %q is not a whole number of tokens (e.g. 120000, or 0 to disable): %w", c.ContextGuardTokens, err)
+	}
+	if n < 0 {
+		return DefaultContextGuardTokens, fmt.Errorf("config: context_guard.tokens = %q is negative; use 0 to disable the guard", c.ContextGuardTokens)
+	}
+	return n, nil
 }
 
 // IdleReclaimAfterDuration returns the idle-reclaim threshold. Unset returns

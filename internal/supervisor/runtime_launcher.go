@@ -75,6 +75,9 @@ type inProcessUnifiedStarter struct {
 	// EventBus. The host TUI uses this to surface a fault banner +
 	// tree-row indicator. QUM-602.
 	faultEmitter func(agent, class, reason, nextAction string)
+	// contextObserver, when non-nil, receives each completed turn's context
+	// size (the context guard, context_guard.go).
+	contextObserver contextTurnObserver
 }
 
 // cardFetcherFn is the published-card source the launch resolves against
@@ -247,6 +250,7 @@ func (s *inProcessUnifiedStarter) Start(spec RuntimeStartSpec) (RuntimeHandle, e
 		ledgerEmitter.RunStarted(context.Background())
 	}
 	stopLedger := runLedgerSubscriber(rt.EventBus(), ledgerEmitter, "ledger")
+	stopContext := runContextWatchSubscriber(rt.EventBus(), spec.Name, s.contextObserver, "context-guard")
 
 	// Phase 6: assemble the handle. Single linear block, no closures already
 	// in flight observe partial state.
@@ -262,6 +266,7 @@ func (s *inProcessUnifiedStarter) Start(spec RuntimeStartSpec) (RuntimeHandle, e
 		stopFault:       stopFault,
 		stopUsage:       stopUsage,
 		stopLedger:      stopLedger,
+		stopContext:     stopContext,
 		sprawlRoot:      spec.SprawlRoot,
 		name:            spec.Name,
 		coord:           coord,
@@ -277,6 +282,7 @@ func (s *inProcessUnifiedStarter) Start(spec RuntimeStartSpec) (RuntimeHandle, e
 	// Phase 8: start the runtime. Rollback on error: tear down subscribers,
 	// close + reap session, close activity file.
 	if err := rt.Start(context.Background()); err != nil {
+		stopContext()
 		stopLedger()
 		stopUsage()
 		stopFault()
@@ -557,6 +563,7 @@ type unifiedHandle struct {
 	stopFault     func()
 	stopUsage     func()
 	stopLedger    func()
+	stopContext   func()
 	sprawlRoot    string
 	name          string
 
@@ -672,6 +679,11 @@ func (h *unifiedHandle) stopOnceWith(ctx context.Context, stopRuntime func(conte
 		if h.stopLedger != nil {
 			joinWithTimeout(h.stopLedger, stopActivityTimeout,
 				"stopLedger abandoned — likely wedged event-log subscriber goroutine (QUM-1249)",
+				"handle", "unifiedHandle", "agent", h.name)
+		}
+		if h.stopContext != nil {
+			joinWithTimeout(h.stopContext, stopActivityTimeout,
+				"stopContext abandoned — likely wedged context-guard subscriber goroutine",
 				"handle", "unifiedHandle", "agent", h.name)
 		}
 		if h.stopDelivery != nil {
