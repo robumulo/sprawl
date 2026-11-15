@@ -332,3 +332,14 @@ func activityAge(n TreeNode, now time.Time) string {
 	}
 	return " ·" + HumanizeSince(now.Sub(n.LastActivityAt))
 }
+
+// On a light terminal the dark-theme amber ramp washes out (the "bright" frame
+// is near-white), so working pills use deeper ambers there.
+func init() {
+	if !LightTerminal() {
+		return
+	}
+	treeWorkStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D97706"))
+	treeWorkPulseFrames = []string{"#F59E0B", "#D97706", "#B45309", "#D97706"}
+	pillSep = lipgloss.NewStyle().Foreground(lipgloss.Color("#A1A1AA"))
+}
