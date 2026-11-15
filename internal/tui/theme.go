@@ -138,7 +138,7 @@ func NewTheme(accentColor string) Theme {
 	// Strip the prefix so we pass just the ANSI number (e.g., "141").
 	accentColor = strings.TrimPrefix(accentColor, "colour")
 
-	pal := defaultDarkPalette(lipgloss.Color(accentColor))
+	pal := paletteFor(lipgloss.Color(accentColor))
 
 	// QUM-661: chassis styles intentionally omit .Background(...) so the
 	// host terminal's bg shows through. The only style that still paints a
