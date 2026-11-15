@@ -812,13 +812,17 @@ const (
 	// preserve switch in the durable-persist block, so the resting status
 	// derived here is not the one that survives.
 	stopReasonOperator
+	// stopReasonContextGuard is the context guard stopping an agent it is about
+	// to wake in a fresh session → StatusIdle, so a failed fresh wake leaves
+	// the agent revivable by the next message.
+	stopReasonContextGuard
 )
 
 // restingStatus maps a teardown reason onto the durable resting Status.
 // Everything that is not an explicit idle-reclaim rests at StatusSuspended:
 // the deliberate default is "parked and revivable", never "faulted".
 func (s stopReason) restingStatus() string {
-	if s == stopReasonIdleReclaim {
+	if s == stopReasonIdleReclaim || s == stopReasonContextGuard {
 		return state.StatusIdle
 	}
 	return state.StatusSuspended
@@ -1179,6 +1183,18 @@ func (r *AgentRuntime) StopAfterTurnIf(ctx context.Context, timeout time.Duratio
 // faulted (defensive default; production handles all expose it via the
 // embedded backend.Session).
 func (r *AgentRuntime) Wake(ctx context.Context, restartInjection string) (*WakeResult, error) {
+	return r.wake(ctx, restartInjection, false)
+}
+
+// WakeFresh is Wake without the --resume attempt: the agent comes back in a
+// brand-new session (a freshly minted session id) whose first turn is
+// restartInjection. Used by the context guard, whose whole point is to drop
+// the old transcript. Same accept-set, locking and persistence as Wake.
+func (r *AgentRuntime) WakeFresh(ctx context.Context, restartInjection string) (*WakeResult, error) {
+	return r.wake(ctx, restartInjection, true)
+}
+
+func (r *AgentRuntime) wake(ctx context.Context, restartInjection string, forceFresh bool) (*WakeResult, error) {
 	// QUM-726: restartInjection is forwarded to RuntimeStartSpec on both
 	// the resume-attempt and fresh-fallback specs so the recipient's first
 	// post-wake turn sees the wake-flavored prompt.
@@ -1270,30 +1286,10 @@ func (r *AgentRuntime) Wake(ctx context.Context, restartInjection string) (*Wake
 	}
 
 	mode := "resumed"
-	newHandle, startErr := starter.Start(resumeSpec)
-	needFallback := false
-	if startErr != nil {
-		// Initial Start error is treated as needing a fresh fallback only if
-		// it's the OnResumeFailure signal in disguise; but starter.Start
-		// errors are conservatively fatal — fall back once with fresh.
-		needFallback = true
-	} else if probeErr := probeNewHandleHealth(newHandle, wakeHealthProbeTimeout); probeErr != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), wakeStopAbandonTimeout)
-		_ = newHandle.StopAbandon(stopCtx)
-		cancel()
-		newHandle = nil
-		needFallback = true
-		slog.Info("supervisor: Wake resume-path health probe failed; falling back to fresh",
-			slog.String("agent", agentName), slog.Any("err", probeErr))
-	} else if resumeRejected.Load() {
-		// OnResumeFailure fired synchronously before/during Start return.
-		stopCtx, cancel := context.WithTimeout(context.Background(), wakeStopAbandonTimeout)
-		_ = newHandle.StopAbandon(stopCtx)
-		cancel()
-		newHandle = nil
-		needFallback = true
-		slog.Info("supervisor: Wake resume cookie rejected; falling back to fresh",
-			slog.String("agent", agentName))
+	var newHandle RuntimeHandle
+	needFallback := true
+	if !forceFresh {
+		newHandle, needFallback = attemptResume(starter, resumeSpec, &resumeRejected, agentName)
 	}
 
 	// OnResumeFailure may also fire shortly AFTER a seemingly-healthy probe,
@@ -1382,6 +1378,39 @@ func (r *AgentRuntime) Wake(ctx context.Context, restartInjection string) (*Wake
 		r.watchHandleExit(newHandle, doneAware.Done())
 	}
 	return &WakeResult{Mode: mode, SessionRestored: mode == "resumed"}, nil
+}
+
+// attemptResume is Wake's --resume attempt. It returns the started handle and
+// whether the caller must fall back to a fresh session (in which case any
+// handle it started has already been abandoned and nil is returned).
+func attemptResume(starter RuntimeStarter, resumeSpec RuntimeStartSpec, resumeRejected *atomic.Bool, agentName string) (RuntimeHandle, bool) {
+	newHandle, startErr := starter.Start(resumeSpec)
+	needFallback := false
+	if startErr != nil {
+		// Initial Start error is treated as needing a fresh fallback only if
+		// it's the OnResumeFailure signal in disguise; but starter.Start
+		// errors are conservatively fatal — fall back once with fresh.
+		needFallback = true
+	} else if probeErr := probeNewHandleHealth(newHandle, wakeHealthProbeTimeout); probeErr != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), wakeStopAbandonTimeout)
+		_ = newHandle.StopAbandon(stopCtx)
+		cancel()
+		newHandle = nil
+		needFallback = true
+		slog.Info("supervisor: Wake resume-path health probe failed; falling back to fresh",
+			slog.String("agent", agentName), slog.Any("err", probeErr))
+	} else if resumeRejected.Load() {
+		// OnResumeFailure fired synchronously before/during Start return.
+		stopCtx, cancel := context.WithTimeout(context.Background(), wakeStopAbandonTimeout)
+		_ = newHandle.StopAbandon(stopCtx)
+		cancel()
+		newHandle = nil
+		needFallback = true
+		slog.Info("supervisor: Wake resume cookie rejected; falling back to fresh",
+			slog.String("agent", agentName))
+	}
+
+	return newHandle, needFallback
 }
 
 // stampDoublyFailedWake records the terminal "wake fell back to fresh and
