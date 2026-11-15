@@ -58,9 +58,9 @@ This applies to every agent. Reviewers must flag suspected leaks and refuse to m
 
 **`guard-employer-leak` exits 3 when its own self-checks did not fire. A 3 is a failed scan, never a clean one** — do not read it as a 0, and do not work around it. The script header carries the full exit-code table and the list of what the scan does *not* examine.
 
-## Linear
+## Goals
 
-Work is tracked in Linear; see `CLAUDE.local.md` for the team and project IDs. Invoke /linear-issues before creating or updating an issue — it defines required fields that are easy to miss. When working an issue: set it In Progress and comment that you picked it up, post findings, decisions and blockers as comments while you work, then set it Done with a summary. When spawning an agent for an issue, keep the prompt short and point it at the issue — the issue is the source of truth, not your paraphrase of it.
+Work is tracked in the goal ledger (the event log), not an external tracker. Invoke /goals before `spawn`, `create_goal`, `request_rework` or `report_result`: a goal carries its own facts in about 600 characters (goal, files, done when), a result fits in about 1k, and each new goal goes to a freshly spawned agent rather than an old one.
 
 ## Skills
 
@@ -75,5 +75,5 @@ Not loaded for you. Read one when its condition applies. A skill holds the *proc
 - /false-red — when a build, validate, test, or merge just failed and you are about to blame your diff.
 - /go-cli-best-practices — before writing or modifying Go code.
 - /cli-ux-best-practices — before adding or changing a CLI command's behaviour.
-- /linear-issues — before creating or managing issues.
+- /goals — before writing a goal, a rework request or a result.
 - /handoff — at the end of a weave session; weave only.
