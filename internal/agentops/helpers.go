@@ -73,7 +73,7 @@ func RealBranchExists(repoRoot, branchName string) bool {
 }
 
 // AssertNotOnMain hard-fails if a non-root agent's worktree HEAD is on branch
-// "main" (QUM-837 defense-in-depth, hook-independent). The root agent
+// "main" or on the repo's default branch (see defaultBranch) (QUM-837 defense-in-depth, hook-independent). The root agent
 // (identity "weave") and a human running git directly (empty identity) are
 // exempt — mirroring the identity semantics of scripts/guard-main-commit and
 // scripts/guard-main-ref.
@@ -98,10 +98,34 @@ func AssertNotOnMain(worktreePath, identity string) error {
 		return nil //nolint:nilerr // branch-resolution failure is treated as not "on main"
 	}
 	branch := strings.TrimSpace(string(out))
-	if branch == "main" {
-		return fmt.Errorf("agent %q worktree %s is on branch 'main'; a non-root agent must never operate on the shared 'main' branch (QUM-837). Its worktree HEAD likely drifted — confirm `git -C %s rev-parse --abbrev-ref HEAD` is the agent's own branch", identity, worktreePath, worktreePath)
+	if branch == "main" || branch == defaultBranch(worktreePath) {
+		return fmt.Errorf("agent %q worktree %s is on branch '%s'; a non-root agent must never operate on the shared '%s' branch (QUM-837). Its worktree HEAD likely drifted — confirm `git -C %s rev-parse --abbrev-ref HEAD` is the agent's own branch", identity, worktreePath, branch, branch, worktreePath)
 	}
 	return nil
+}
+
+// defaultBranch resolves the shared default branch of the repo containing
+// worktreePath, in the same order `sprawl hooks install` uses for the hook
+// guards: origin/HEAD → init.defaultBranch → "main". "main" stays protected
+// regardless (see AssertNotOnMain); this adds a fork or repo whose default is
+// named differently (e.g. "master", or a fork's own default branch).
+func defaultBranch(worktreePath string) string {
+	git := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", worktreePath}, args...)...) //nolint:gosec // arguments are not user-controlled
+		cmd.Stderr = io.Discard
+		out, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if b := strings.TrimPrefix(git("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"), "origin/"); b != "" {
+		return b
+	}
+	if b := git("config", "--get", "init.defaultBranch"); b != "" {
+		return b
+	}
+	return "main"
 }
 
 // RealGitBranchDelete force-deletes a git branch using 'git branch -D'.

@@ -23,6 +23,9 @@ func initRepoOnBranchForAssert(t *testing.T, branch string) string {
 		}
 	}
 	run("init")
+	// Hermetic: the developer's global init.defaultBranch must not decide
+	// which branch the test repo treats as its default.
+	run("config", "init.defaultBranch", "main")
 	run("symbolic-ref", "HEAD", "refs/heads/"+branch)
 	run("commit", "--allow-empty", "-m", "initial")
 	return dir
@@ -36,6 +39,62 @@ func detachHEAD(t *testing.T, dir string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git checkout --detach: %s: %v", out, err)
+	}
+}
+
+// TestAssertNotOnMain_DefaultBranch covers a repo whose shared branch is not
+// named "main": its default branch (origin/HEAD, else init.defaultBranch) is
+// protected too, and "main" stays protected.
+func TestAssertNotOnMain_DefaultBranch(t *testing.T) {
+	setDefault := func(dir, how, branch string) {
+		t.Helper()
+		var args []string
+		if how == "origin" {
+			args = []string{"symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/" + branch}
+		} else {
+			args = []string{"config", "init.defaultBranch", branch}
+		}
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s: %v", args, out, err)
+		}
+	}
+	forkDefault := initRepoOnBranchForAssert(t, "trunk")
+	setDefault(forkDefault, "origin", "trunk")
+	configDefault := initRepoOnBranchForAssert(t, "master")
+	setDefault(configDefault, "config", "master")
+	mainStill := initRepoOnBranchForAssert(t, "main")
+	setDefault(mainStill, "origin", "trunk")
+	feature := initRepoOnBranchForAssert(t, "feature")
+	setDefault(feature, "origin", "trunk")
+
+	cases := []struct {
+		name     string
+		worktree string
+		wantErr  string
+	}{
+		{name: "origin/HEAD default branch => error", worktree: forkDefault, wantErr: "trunk"},
+		{name: "init.defaultBranch default branch => error", worktree: configDefault, wantErr: "master"},
+		{name: "main still protected when default differs", worktree: mainStill, wantErr: "main"},
+		{name: "feature branch => ok", worktree: feature},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := AssertNotOnMain(tc.worktree, "engineer")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "'"+tc.wantErr+"'") {
+				t.Fatalf("expected error naming %q, got: %v", tc.wantErr, err)
+			}
+			if err2 := AssertNotOnMain(tc.worktree, "weave"); err2 != nil {
+				t.Errorf("weave must stay exempt, got: %v", err2)
+			}
+		})
 	}
 }
 
