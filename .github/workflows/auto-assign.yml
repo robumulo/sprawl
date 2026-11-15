@@ -1,0 +1,33 @@
+# Assign new issues and pull requests to the fork owner when nobody is
+# assigned yet. GitHub has no repo-level "default assignee" setting.
+#
+# pull_request_target (not pull_request) so PRs from other forks also get a
+# token that can write; this job never checks out or runs PR code.
+name: auto-assign
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign the repository owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ASSIGNED: ${{ toJSON(github.event.issue.assignees || github.event.pull_request.assignees) }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ "$(echo "$ASSIGNED" | jq length)" -gt 0 ]; then
+            echo "#$NUMBER already has an assignee"; exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$NUMBER/assignees" \
+            -f "assignees[]=$OWNER" --jq '.assignees[].login'
